@@ -1,0 +1,148 @@
+import React, { useEffect, useState, useCallback } from "react";
+import { Table, Button } from "react-bootstrap";
+import { changeReqStatus, deleteReq, getReqLessons } from "../../http/lessonAPI";
+import CreateReqModal from "../Modals/CreateReq";
+import EditReqModal from "../Modals/EditRequest";
+
+// Компонент таблицы заявок
+const RequestTable = ({ extraActions = false, currentUser }) => {
+
+    // Состояние для хранения списка заявок
+    const [scheduleReq, setScheduleReq] = useState([]);
+
+    const [filteredReq, setFilteredReq] = useState([]);
+
+    // Функция для получения данных о заявках из БД
+     const fetchData = useCallback(async () => {
+        const scheduleDataReq = await getReqLessons();
+        setScheduleReq(scheduleDataReq);
+
+        if (currentUser && !extraActions) {
+            const teacherName = currentUser.teacher?.surname_N_P;
+            if (teacherName) {
+                const filtered = scheduleDataReq.filter(item =>
+                    item.teacher_list?.surname_N_P === teacherName
+                );
+                setFilteredReq(filtered);
+                return;
+            }
+        }
+       setFilteredReq(scheduleDataReq);
+    }, [currentUser, extraActions]);
+
+    // Функция для удаления заявки с подтверждением
+    const handleDeleteReq = async (id) => {
+        const confirmDelete = window.confirm("Вы уверены, что хотите удалить эту заявку?");
+        if (confirmDelete) {
+            await deleteReq(id);
+            fetchData();
+        }
+    };
+
+    // Используем useEffect для вызова fetchData при монтировании компонента
+    useEffect(() => {
+        fetchData();
+    }, [fetchData, currentUser]);
+
+    // Состояние для управления модальным окном создания урока
+    const [showRequestModal, setShowRequestModal] = useState(false);
+
+    const [showEditRequestModal, setShowEditRequestModal] = useState(false);
+    const [selectedRequest, setSelectedRequest] = useState(null);
+
+    // Обработчик открытия модального окна создания урока
+    const handleShowRequestModal = () => {
+        setShowRequestModal(true);
+    };
+    const handleShowEditRequestModal = (req) => {
+        setSelectedRequest(req);
+        setShowEditRequestModal(true);
+    };
+
+    const requestsToShow = extraActions ? scheduleReq : filteredReq;
+
+    return (
+        <>
+            <Button
+                variant="primary"
+                onClick={handleShowRequestModal}
+                className="mt-3"
+                style={{ backgroundColor: '#4682B4', borderColor: '#4682B4', position: 'initial' }} // Изменение фона и цвета границы
+            >
+                Добавить заявку
+            </Button>
+            <Table striped bordered hover className="mt-3" style={{ position: 'relative' }}>
+                <thead style={{ position: 'sticky', top: -1, backgroundColor: 'white', zIndex: 1 }}>
+                    <tr>
+                        <th>№ заявки</th>
+                        <th>Дата подачи</th>
+                        <th>№ аудитории</th>
+                        <th>№ пары</th>
+                        <th>Преподаватель</th>
+                        <th>Дисциплина</th>
+                        <th>Группа</th>
+                        <th>Дата первого занятия</th>
+                        <th>Период</th>
+                        <th>Дата последнего занятия</th>
+                        <th>Статус</th>
+                        <th colSpan={extraActions ? 4 : 1}>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {/* Отображаем список заявок */}
+                    {requestsToShow.sort((a, b) => b.id - a.id).map((item, index) => (
+                        <tr key={index}>
+                            <td>{item.id}</td>
+                            <td>{new Date(item.submissionDate).toLocaleDateString()}</td>
+                            <td>{item.auditorium_list && item.auditorium_list.number ? item.auditorium_list.number : 'NULL'}</td>
+                            <td>{item.number}</td>
+                            <td>{item.teacher_list && item.teacher_list.surname_N_P ? item.teacher_list.surname_N_P : 'NULL'}</td>
+                            <td>{item.discipline_list && item.discipline_list.short_name ? item.discipline_list.short_name : 'NULL'}</td>
+                            <td>{item.group_list && item.group_list.name ? item.group_list.name : 'NULL'}</td>
+                            <td>{new Date(item.firstDate).toLocaleDateString()}</td>
+                            <td>{item.period === 0 ? 'Разовое занятие' : item.period}</td>
+                            <td>{new Date(item.lastDate).toLocaleDateString()}</td>
+                            <td>{item.status}</td>
+                            <td>
+                                <Button
+                                    variant="outline-danger"
+                                    onClick={() => handleDeleteReq(item.id)} // Используем функцию для удаления с подтверждением
+                                >
+                                    Удалить
+                                </Button>
+                            </td>
+                            {extraActions && (
+                                <>
+                                    <td>
+                                        <Button
+                                            variant="outline-dark"
+                                            onClick={() => handleShowEditRequestModal(item)}
+                                        >
+                                            Редактировать
+                                        </Button>
+                                    </td>
+
+                                    {/* Кнопки для изменения статуса заявки */}
+                                    <td>
+                                        <Button variant="outline-primary" onClick={async () => { await changeReqStatus(item.id, 'Отклонена'); fetchData(); }}>Отклонить</Button>
+                                    </td>
+                                    <td>
+                                        <Button variant="outline-success" onClick={async () => { await changeReqStatus(item.id, 'Одобрена'); fetchData(); }}>Одобрить</Button>
+                                    </td>
+                                </>
+                            )}
+                        </tr>
+                    ))}
+                </tbody>
+            </Table>
+            <CreateReqModal show={showRequestModal} onHide={() => { setShowRequestModal(false); fetchData() }} />
+            <EditReqModal
+                show={showEditRequestModal}
+                onHide={() => { setShowEditRequestModal(false); setSelectedRequest(null); fetchData(); }}
+                request={selectedRequest} // Передаем выбранную заявку на урок для редактирования
+            />
+        </>
+    );
+};
+
+export default RequestTable;

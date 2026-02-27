@@ -1,0 +1,18 @@
+.hoverable {
+    transition: background-color 0.1s ease;
+}
+
+.hoverable:hover {
+    outline: 2px solid #3a98f6; 
+}
+
+.react-datepicker-wrapper,
+.react-datepicker__input-container {
+  width: 100%;
+}
+.custom-datepicker::placeholder {
+    color: #000;
+  }
+.about_info{
+    justify-content: space-between;
+}
