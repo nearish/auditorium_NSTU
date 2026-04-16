@@ -1,0 +1,166 @@
+const { ClassSchedule, AuditoriumList, TeacherList, DisciplineList, GroupList, InitList } = require('../models/models');
+const sequelize = require('../db');
+
+class BulkScheduleController {
+    
+    async bulkCreate(req, res) {
+        try {
+            const { auditoriumId, slots, teacherIds, disciplineId, groupIds, startDate, lessonCount } = req.body;
+
+            // Валидация входных данных
+            if (!auditoriumId || !slots?.length || !teacherIds?.length || !disciplineId || !groupIds?.length || !startDate || !lessonCount) {
+                return res.status(400).json({ message: "Не все обязательные поля заполнены" });
+            }
+
+            // Проверяем существование связанных сущностей
+            const auditorium = await AuditoriumList.findByPk(auditoriumId);
+            const discipline = await DisciplineList.findByPk(disciplineId);
+
+            if (!auditorium || !discipline) {
+                return res.status(404).json({ message: "Аудитория или дисциплина не найдены" });
+            }
+
+            // Проверяем преподавателей
+            const teachers = await TeacherList.findAll({ where: { id: teacherIds } });
+            if (teachers.length !== teacherIds.length) {
+                return res.status(404).json({ message: "Один или несколько преподавателей не найдены" });
+            }
+
+            // Проверяем группы
+            const groups = await GroupList.findAll({ where: { id: groupIds } });
+            if (groups.length !== groupIds.length) {
+                return res.status(404).json({ message: "Одна или несколько групп не найдены" });
+            }
+
+            const initRecord = await InitList.findOne({ where: { id: 1 } });
+            const semesterStartDate = initRecord ? new Date(initRecord.startDate) : new Date(startDate);
+
+            const createdLessons = [];
+            const errors = [];
+
+            // Для каждой комбинации: слот × преподаватель × группа
+            for (const slot of slots) {
+                for (const teacherId of teacherIds) {
+                    for (const groupId of groupIds) {
+                        try {
+                            const { dayOfWeek, weekParity } = slot;
+                            let { pairNumber } = slot;
+
+                            if (typeof pairNumber === 'string') {
+                                const match = pairNumber.match(/\d+/);
+                                pairNumber = match ? parseInt(match[0], 10) : pairNumber;
+                            }
+
+                            const period = 2;
+
+                            const firstDate = BulkScheduleController.prototype.calculateFirstDate(
+                                semesterStartDate,
+                                startDate,
+                                dayOfWeek,
+                                weekParity
+                            );
+
+                            const calculatedEndDate = new Date(firstDate);
+                            calculatedEndDate.setDate(calculatedEndDate.getDate() + (lessonCount - 1) * period * 7);
+                            
+                            const yearEnd = calculatedEndDate.getFullYear();
+                            const monthEnd = String(calculatedEndDate.getMonth() + 1).padStart(2, '0');
+                            const dayEnd = String(calculatedEndDate.getDate()).padStart(2, '0');
+                            const endDate = `${yearEnd}-${monthEnd}-${dayEnd}`;
+
+                            const date = new Date(firstDate);
+                            const month = date.getMonth() + 1;
+                            const year = date.getFullYear();
+                            
+                            let semester;
+                            if (month >= 1 && month <= 6) {
+                                semester = "Весенний";
+                            } else {
+                                semester = "Осенний";
+                            }
+
+                            const maxIdResult = await sequelize.query("SELECT MAX(id) FROM class_schedules");
+                            const maxId = maxIdResult[0][0].max || 0;
+                            await sequelize.query(`ALTER SEQUENCE class_schedules_id_seq RESTART WITH ${maxId + 1}`);
+
+                            const lesson = await ClassSchedule.create({
+                                number: pairNumber,
+                                firstDate,
+                                period,
+                                lastDate: endDate,
+                                teacherListId: teacherId,
+                                disciplineListId: disciplineId,
+                                groupListId: groupId,
+                                auditoriumListId: auditoriumId,
+                                semester,
+                                year
+                            });
+
+                            createdLessons.push(lesson);
+                        } catch (slotError) {
+                            console.error('Ошибка при создании слота:', slotError);
+                            errors.push({ slot, teacherId, groupId, error: slotError.message });
+                        }
+                    }
+                }
+            }
+
+            return res.json({
+                message: `Создано ${createdLessons.length} занятий`,
+                created: createdLessons,
+                errors: errors.length > 0 ? errors : undefined
+            });
+
+        } catch (error) {
+            console.error('Ошибка в bulkCreate:', error);
+            return res.status(500).json({ message: "Ошибка при массовом создании занятий" });
+        }
+    }
+
+    calculateFirstDate(semesterStart, userStartDate, targetDayOfWeek, weekParity) {
+        let baseDate = userStartDate ? new Date(userStartDate) : new Date(semesterStart);
+        
+        const currentDayOfWeek = baseDate.getDay() === 0 ? 7 : baseDate.getDay();
+        
+        let daysToAdd = targetDayOfWeek - currentDayOfWeek;
+        if (daysToAdd < 0) {
+            daysToAdd += 7;
+        }
+        
+        let targetDate = new Date(baseDate);
+        targetDate.setDate(targetDate.getDate() + daysToAdd);
+        
+        if (weekParity) {
+            const weekNumber = BulkScheduleController.prototype.getWeekNumber(targetDate, semesterStart);
+            const currentParity = weekNumber % 2 === 0 ? 'even' : 'odd';
+            
+            if (currentParity !== weekParity) {
+                targetDate.setDate(targetDate.getDate() + 7);
+            }
+        }
+        
+        const year = targetDate.getFullYear();
+        const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+        const day = String(targetDate.getDate()).padStart(2, '0');
+        
+        return `${year}-${month}-${day}`;
+    }
+
+    getWeekNumber(date, semesterStart) {
+        const start = new Date(semesterStart);
+        const diffTime = date - start;
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        return Math.floor(diffDays / 7) + 1;
+    }
+
+    async checkConflicts(req, res) {
+        try {
+            return res.json({ hasConflicts: false, conflicts: [] });
+        } catch (error) {
+            console.error('Ошибка при проверке конфликтов:', error);
+            return res.status(500).json({ message: "Ошибка при проверке конфликтов" });
+        }
+    }
+}
+
+module.exports = new BulkScheduleController();
