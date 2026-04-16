@@ -11,6 +11,47 @@ import { bulkCreateLessons, getLessons, getReqLessons } from '../../http/lessonA
 
 registerLocale('ru', ru);
 
+// Стили для убирания синей рамки при фокусе
+const injectGlobalStyles = () => {
+    const style = document.createElement('style');
+    style.innerHTML = `
+        .custom-select-no-outline:focus,
+        .custom-dropdown-toggle:focus,
+        .form-control:focus,
+        .react-datepicker-wrapper input:focus {
+            outline: none !important;
+            box-shadow: none !important;
+            border-color: #ced4da !important;
+        }
+        .custom-dropdown-toggle {
+            background-color: white !important;
+            border: 1px solid #ced4da !important;
+            border-radius: 6px !important;
+            padding: 8px 12px !important;
+            font-size: 14px !important;
+            width: 100% !important;
+            text-align: left !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            color: #212529 !important;
+        }
+        .custom-dropdown-toggle:hover {
+            background-color: white !important;
+            border-color: #ced4da !important;
+        }
+        .custom-dropdown-toggle::after {
+            float: right;
+            margin-top: 8px;
+        }
+        .placeholder-color::placeholder {
+            color: #6c757d !important;
+        }
+    `;
+    document.head.appendChild(style);
+};
+
+injectGlobalStyles();
+
 const BulkAssignmentModal = ({
     show,
     onHide,
@@ -471,11 +512,17 @@ const BulkAssignmentModal = ({
                             </div>
                         )}
 
-                        {/* Выпадающий список для преподавателей */}
+                        {/* Преподаватели */}
                         <Form.Group className="mb-3">
                             <Form.Label style={{ fontWeight: 'bold' }}>Преподаватели</Form.Label>
                             <Dropdown show={teacherDropdownOpen} onToggle={setTeacherDropdownOpen}>
-                                <Dropdown.Toggle variant="outline-secondary" style={{ width: '100%', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                <Dropdown.Toggle 
+                                    variant="light" 
+                                    className="custom-dropdown-toggle"
+                                    style={{
+                                        color: selectedTeachers.length === 0 ? '#6c757d' : '#212529'
+                                    }}
+                                >
                                     {getSelectedTeachersText()}
                                 </Dropdown.Toggle>
                                 <Dropdown.Menu style={{ maxHeight: '300px', overflowY: 'auto', width: '100%', padding: '8px 0' }}>
@@ -493,21 +540,43 @@ const BulkAssignmentModal = ({
                             </Dropdown>
                         </Form.Group>
 
+                        {/* Дисциплина */}
                         <Form.Group className="mb-3">
                             <Form.Label style={{ fontWeight: 'bold' }}>Дисциплина</Form.Label>
-                            <Form.Select value={selectedDiscipline} onChange={e => { setSelectedDiscipline(e.target.value); setError(''); }}>
-                                <option value="">Выберите дисциплину</option>
+                            <Form.Select 
+                                value={selectedDiscipline} 
+                                onChange={e => { setSelectedDiscipline(e.target.value); setError(''); }}
+                                className="custom-select-no-outline"
+                                style={{
+                                    width: '100%',
+                                    padding: '8px 12px',
+                                    border: '1px solid #ced4da',
+                                    borderRadius: '6px',
+                                    fontSize: '14px',
+                                    backgroundColor: 'white',
+                                    color: selectedDiscipline ? '#212529' : '#6c757d'
+                                }}
+                            >
+                                <option value="" style={{ color: '#6c757d' }}>Выберите дисциплину</option>
                                 {disciplines.map(discipline => (
-                                    <option key={discipline.id} value={discipline.id}>{discipline.short_name || discipline.name}</option>
+                                    <option key={discipline.id} value={discipline.id} style={{ color: '#212529' }}>
+                                        {discipline.short_name || discipline.name}
+                                    </option>
                                 ))}
                             </Form.Select>
                         </Form.Group>
 
-                        {/* Выпадающий список для групп */}
+                        {/* Группы */}
                         <Form.Group className="mb-3">
                             <Form.Label style={{ fontWeight: 'bold' }}>Группы</Form.Label>
                             <Dropdown show={groupDropdownOpen} onToggle={setGroupDropdownOpen}>
-                                <Dropdown.Toggle variant="outline-secondary" style={{ width: '100%', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                <Dropdown.Toggle 
+                                    variant="light" 
+                                    className="custom-dropdown-toggle"
+                                    style={{
+                                        color: selectedGroups.length === 0 ? '#6c757d' : '#212529'
+                                    }}
+                                >
                                     {getSelectedGroupsText()}
                                 </Dropdown.Toggle>
                                 <Dropdown.Menu style={{ maxHeight: '300px', overflowY: 'auto', width: '100%', padding: '8px 0' }}>
