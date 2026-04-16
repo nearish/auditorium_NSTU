@@ -1,166 +1,552 @@
-const { ClassSchedule, AuditoriumList, TeacherList, DisciplineList, GroupList, InitList } = require('../models/models');
-const sequelize = require('../db');
+import React, { useState, useEffect } from 'react';
+import { Modal, Button, Form, Row, Col, Alert, Spinner, Dropdown } from 'react-bootstrap';
+import DatePicker, { registerLocale } from 'react-datepicker';
+import ru from 'date-fns/locale/ru';
+import 'react-datepicker/dist/react-datepicker.css';
+import { getTeachers } from '../../http/TeacherAPI';
+import { getDisciplines } from '../../http/disciplineAPI';
+import { getGroups } from '../../http/groupAPI';
+import { getInit } from '../../http/initAPI';
+import { bulkCreateLessons, getLessons, getReqLessons } from '../../http/lessonAPI';
 
-class BulkScheduleController {
+registerLocale('ru', ru);
+
+const BulkAssignmentModal = ({
+    show,
+    onHide,
+    selectedSlots = [],
+    auditoriumId,
+    auditoriumNumber,
+    onSuccess
+}) => {
+    // Состояния загрузки данных
+    const [teachers, setTeachers] = useState([]);
+    const [disciplines, setDisciplines] = useState([]);
+    const [groups, setGroups] = useState([]);
+    const [schedule, setSchedule] = useState([]);
+    const [scheduleReq, setScheduleReq] = useState([]);
+    const [semesterStartDate, setSemesterStartDate] = useState(null);
+    const [isLoadingData, setIsLoadingData] = useState(true);
+
+    // Состояния формы
+    const [startDate, setStartDate] = useState(null);
+    const [lessonCount, setLessonCount] = useState('');
+    const [calculatedEndDate, setCalculatedEndDate] = useState(null);
+    const [selectedTeachers, setSelectedTeachers] = useState([]);
+    const [selectedDiscipline, setSelectedDiscipline] = useState('');
+    const [selectedGroups, setSelectedGroups] = useState([]);
     
-    async bulkCreate(req, res) {
-        try {
-            const { auditoriumId, slots, teacherIds, disciplineId, groupIds, startDate, lessonCount } = req.body;
+    // Состояния для выпадающих списков
+    const [teacherDropdownOpen, setTeacherDropdownOpen] = useState(false);
+    const [groupDropdownOpen, setGroupDropdownOpen] = useState(false);
+    
+    // Состояния UI
+    const [error, setError] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isCheckingConflicts, setIsCheckingConflicts] = useState(false);
 
-            // Валидация входных данных
-            if (!auditoriumId || !slots?.length || !teacherIds?.length || !disciplineId || !groupIds?.length || !startDate || !lessonCount) {
-                return res.status(400).json({ message: "Не все обязательные поля заполнены" });
-            }
+    // Функция расчета даты последнего занятия
+    const calculateEndDate = (start, count) => {
+        if (!start || !count || count < 1) return null;
+        const period = 2;
+        const endDate = new Date(start);
+        endDate.setDate(endDate.getDate() + (parseInt(count, 10) - 1) * period * 7);
+        return endDate;
+    };
 
-            // Проверяем существование связанных сущностей
-            const auditorium = await AuditoriumList.findByPk(auditoriumId);
-            const discipline = await DisciplineList.findByPk(disciplineId);
+    // Вспомогательная функция для расчета номера недели
+    const getWeekNumber = (date, semesterStart) => {
+        const start = new Date(semesterStart);
+        const diffTime = date - start;
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        return Math.floor(diffDays / 7) + 1;
+    };
 
-            if (!auditorium || !discipline) {
-                return res.status(404).json({ message: "Аудитория или дисциплина не найдены" });
-            }
-
-            // Проверяем преподавателей
-            const teachers = await TeacherList.findAll({ where: { id: teacherIds } });
-            if (teachers.length !== teacherIds.length) {
-                return res.status(404).json({ message: "Один или несколько преподавателей не найдены" });
-            }
-
-            // Проверяем группы
-            const groups = await GroupList.findAll({ where: { id: groupIds } });
-            if (groups.length !== groupIds.length) {
-                return res.status(404).json({ message: "Одна или несколько групп не найдены" });
-            }
-
-            const initRecord = await InitList.findOne({ where: { id: 1 } });
-            const semesterStartDate = initRecord ? new Date(initRecord.startDate) : new Date(startDate);
-
-            const createdLessons = [];
-            const errors = [];
-
-            // Для каждой комбинации: слот × преподаватель × группа
-            for (const slot of slots) {
-                for (const teacherId of teacherIds) {
-                    for (const groupId of groupIds) {
-                        try {
-                            const { dayOfWeek, weekParity } = slot;
-                            let { pairNumber } = slot;
-
-                            if (typeof pairNumber === 'string') {
-                                const match = pairNumber.match(/\d+/);
-                                pairNumber = match ? parseInt(match[0], 10) : pairNumber;
-                            }
-
-                            const period = 2;
-
-                            const firstDate = BulkScheduleController.prototype.calculateFirstDate(
-                                semesterStartDate,
-                                startDate,
-                                dayOfWeek,
-                                weekParity
-                            );
-
-                            const calculatedEndDate = new Date(firstDate);
-                            calculatedEndDate.setDate(calculatedEndDate.getDate() + (lessonCount - 1) * period * 7);
-                            
-                            const yearEnd = calculatedEndDate.getFullYear();
-                            const monthEnd = String(calculatedEndDate.getMonth() + 1).padStart(2, '0');
-                            const dayEnd = String(calculatedEndDate.getDate()).padStart(2, '0');
-                            const endDate = `${yearEnd}-${monthEnd}-${dayEnd}`;
-
-                            const date = new Date(firstDate);
-                            const month = date.getMonth() + 1;
-                            const year = date.getFullYear();
-                            
-                            let semester;
-                            if (month >= 1 && month <= 6) {
-                                semester = "Весенний";
-                            } else {
-                                semester = "Осенний";
-                            }
-
-                            const maxIdResult = await sequelize.query("SELECT MAX(id) FROM class_schedules");
-                            const maxId = maxIdResult[0][0].max || 0;
-                            await sequelize.query(`ALTER SEQUENCE class_schedules_id_seq RESTART WITH ${maxId + 1}`);
-
-                            const lesson = await ClassSchedule.create({
-                                number: pairNumber,
-                                firstDate,
-                                period,
-                                lastDate: endDate,
-                                teacherListId: teacherId,
-                                disciplineListId: disciplineId,
-                                groupListId: groupId,
-                                auditoriumListId: auditoriumId,
-                                semester,
-                                year
-                            });
-
-                            createdLessons.push(lesson);
-                        } catch (slotError) {
-                            console.error('Ошибка при создании слота:', slotError);
-                            errors.push({ slot, teacherId, groupId, error: slotError.message });
-                        }
-                    }
-                }
-            }
-
-            return res.json({
-                message: `Создано ${createdLessons.length} занятий`,
-                created: createdLessons,
-                errors: errors.length > 0 ? errors : undefined
-            });
-
-        } catch (error) {
-            console.error('Ошибка в bulkCreate:', error);
-            return res.status(500).json({ message: "Ошибка при массовом создании занятий" });
-        }
-    }
-
-    calculateFirstDate(semesterStart, userStartDate, targetDayOfWeek, weekParity) {
-        let baseDate = userStartDate ? new Date(userStartDate) : new Date(semesterStart);
-        
+    // Вспомогательная функция расчета даты первого занятия для слота
+    const calculateFirstDateForSlot = (baseStartDate, targetDayOfWeek, weekParity, semesterStart) => {
+        const baseDate = new Date(baseStartDate);
         const currentDayOfWeek = baseDate.getDay() === 0 ? 7 : baseDate.getDay();
         
         let daysToAdd = targetDayOfWeek - currentDayOfWeek;
-        if (daysToAdd < 0) {
-            daysToAdd += 7;
-        }
+        if (daysToAdd < 0) daysToAdd += 7;
         
         let targetDate = new Date(baseDate);
         targetDate.setDate(targetDate.getDate() + daysToAdd);
         
-        if (weekParity) {
-            const weekNumber = BulkScheduleController.prototype.getWeekNumber(targetDate, semesterStart);
+        if (weekParity && semesterStart) {
+            const weekNumber = getWeekNumber(targetDate, semesterStart);
             const currentParity = weekNumber % 2 === 0 ? 'even' : 'odd';
-            
             if (currentParity !== weekParity) {
                 targetDate.setDate(targetDate.getDate() + 7);
             }
         }
         
-        const year = targetDate.getFullYear();
-        const month = String(targetDate.getMonth() + 1).padStart(2, '0');
-        const day = String(targetDate.getDate()).padStart(2, '0');
+        return targetDate;
+    };
+
+    // Функция проверки конфликтов для одного слота
+    const checkSlotCollision = (audNumber, pairNumber, firstDate, period, lastDate) => {
+        const ReqFDate = new Date(firstDate);
+        const ReqLDate = new Date(lastDate);
         
-        return `${year}-${month}-${day}`;
-    }
-
-    getWeekNumber(date, semesterStart) {
-        const start = new Date(semesterStart);
-        const diffTime = date - start;
-        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-        return Math.floor(diffDays / 7) + 1;
-    }
-
-    async checkConflicts(req, res) {
-        try {
-            return res.json({ hasConflicts: false, conflicts: [] });
-        } catch (error) {
-            console.error('Ошибка при проверке конфликтов:', error);
-            return res.status(500).json({ message: "Ошибка при проверке конфликтов" });
+        // Проверяем основное расписание
+        for (let i = 0; i < schedule.length; i++) {
+            const item = schedule[i];
+            let itemPeriod = item.period;
+            if (itemPeriod === 0) itemPeriod = 1;
+            
+            const LessonFDate = new Date(item.firstDate);
+            const LessonLDate = new Date(item.lastDate);
+            
+            if (
+                item.auditorium_list?.number === audNumber &&
+                item.number === pairNumber &&
+                LessonFDate.getDay() === ReqFDate.getDay()
+            ) {
+                let reqCheckDate = new Date(ReqFDate);
+                while (reqCheckDate <= ReqLDate) {
+                    let lessonCheckDate = new Date(LessonFDate);
+                    while (lessonCheckDate <= LessonLDate) {
+                        if (reqCheckDate.getTime() === lessonCheckDate.getTime()) {
+                            return {
+                                hasConflict: true,
+                                conflictInfo: {
+                                    type: 'schedule',
+                                    discipline: item.discipline_list?.short_name || '—',
+                                    group: item.group_list?.name || '—',
+                                    teacher: item.teacher_list?.surname_N_P || '—',
+                                    date: reqCheckDate.toLocaleDateString('ru-RU')
+                                }
+                            };
+                        }
+                        lessonCheckDate.setDate(lessonCheckDate.getDate() + 7 * itemPeriod);
+                    }
+                    reqCheckDate.setDate(reqCheckDate.getDate() + 7 * period);
+                }
+            }
         }
-    }
-}
+        
+        // Проверяем заявки
+        for (let i = 0; i < scheduleReq.length; i++) {
+            const item = scheduleReq[i];
+            if (item.status === 'Отклонена') continue;
+            
+            let itemPeriod = item.period;
+            if (itemPeriod === 0) itemPeriod = 1;
+            
+            const LessonFDate = new Date(item.firstDate);
+            const LessonLDate = new Date(item.lastDate);
+            
+            if (
+                item.auditorium_list?.number === audNumber &&
+                item.number === pairNumber &&
+                LessonFDate.getDay() === ReqFDate.getDay()
+            ) {
+                let reqCheckDate = new Date(ReqFDate);
+                while (reqCheckDate <= ReqLDate) {
+                    let lessonCheckDate = new Date(LessonFDate);
+                    while (lessonCheckDate <= LessonLDate) {
+                        if (reqCheckDate.getTime() === lessonCheckDate.getTime()) {
+                            return {
+                                hasConflict: true,
+                                conflictInfo: {
+                                    type: 'request',
+                                    status: item.status,
+                                    discipline: item.discipline_list?.short_name || '—',
+                                    group: item.group_list?.name || '—',
+                                    teacher: item.teacher_list?.surname_N_P || '—',
+                                    date: reqCheckDate.toLocaleDateString('ru-RU')
+                                }
+                            };
+                        }
+                        lessonCheckDate.setDate(lessonCheckDate.getDate() + 7 * itemPeriod);
+                    }
+                    reqCheckDate.setDate(reqCheckDate.getDate() + 7 * period);
+                }
+            }
+        }
+        
+        return { hasConflict: false, conflictInfo: null };
+    };
 
-module.exports = new BulkScheduleController();
+    // Функция проверки всех выбранных слотов
+    const checkAllSlotsForConflicts = (slots, start, count, semesterStart) => {
+        const conflicts = [];
+        
+        const period = 2;
+        const endDate = new Date(start);
+        endDate.setDate(endDate.getDate() + (count - 1) * period * 7);
+        
+        for (const slot of slots) {
+            const { dayOfWeek, pairNumber, weekParity } = slot;
+            const firstDate = calculateFirstDateForSlot(start, dayOfWeek, weekParity, semesterStart);
+            
+            const result = checkSlotCollision(
+                auditoriumNumber,
+                pairNumber,
+                firstDate,
+                period,
+                endDate
+            );
+            
+            if (result.hasConflict) {
+                conflicts.push({
+                    slot: {
+                        dayOfWeek,
+                        pairNumber,
+                        weekParity,
+                        dayName: ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'][dayOfWeek - 1]
+                    },
+                    ...result.conflictInfo
+                });
+            }
+        }
+        
+        return conflicts;
+    };
+
+    // Функции для работы с выпадающими списками
+    const toggleTeacher = (teacherId) => {
+        if (selectedTeachers.includes(teacherId)) {
+            setSelectedTeachers(selectedTeachers.filter(id => id !== teacherId));
+        } else {
+            setSelectedTeachers([...selectedTeachers, teacherId]);
+        }
+    };
+
+    const toggleGroup = (groupId) => {
+        if (selectedGroups.includes(groupId)) {
+            setSelectedGroups(selectedGroups.filter(id => id !== groupId));
+        } else {
+            setSelectedGroups([...selectedGroups, groupId]);
+        }
+    };
+
+    const getSelectedTeachersText = () => {
+        if (selectedTeachers.length === 0) return 'Выберите преподавателей';
+        const names = selectedTeachers.map(id => 
+            teachers.find(t => t.id === id)?.surname_N_P || ''
+        );
+        return names.slice(0, 3).join(', ') + (names.length > 3 ? ` и ещё ${names.length - 3}` : '');
+    };
+
+    const getSelectedGroupsText = () => {
+        if (selectedGroups.length === 0) return 'Выберите группы';
+        const names = selectedGroups.map(id => 
+            groups.find(g => g.id === id)?.name || ''
+        );
+        return names.slice(0, 3).join(', ') + (names.length > 3 ? ` и ещё ${names.length - 3}` : '');
+    };
+
+    // Автоматический пересчет даты окончания
+    useEffect(() => {
+        if (startDate && lessonCount && lessonCount > 0) {
+            const end = calculateEndDate(startDate, lessonCount);
+            setCalculatedEndDate(end);
+        } else {
+            setCalculatedEndDate(null);
+        }
+    }, [startDate, lessonCount]);
+
+    // Загрузка справочников при открытии
+    useEffect(() => {
+        if (show) {
+            const loadData = async () => {
+                setIsLoadingData(true);
+                setError('');
+                try {
+                    const [
+                        teachersData, 
+                        disciplinesData, 
+                        groupsData, 
+                        initData, 
+                        scheduleData, 
+                        scheduleReqData
+                    ] = await Promise.all([
+                        getTeachers(),
+                        getDisciplines(),
+                        getGroups(),
+                        getInit(1),
+                        getLessons(),
+                        getReqLessons()
+                    ]);
+                    
+                    setTeachers(teachersData.sort((a, b) => a.surname_N_P.localeCompare(b.surname_N_P)));
+                    setDisciplines(disciplinesData.sort((a, b) => a.name.localeCompare(b.name)));
+                    setGroups(groupsData.sort((a, b) => a.name.localeCompare(b.name)));
+                    setSchedule(scheduleData);
+                    setScheduleReq(scheduleReqData);
+                    
+                    if (initData && initData.startDate) {
+                        const semesterStart = new Date(initData.startDate);
+                        setStartDate(semesterStart);
+                        setSemesterStartDate(semesterStart);
+                    }
+                    
+                    setSelectedTeachers([]);
+                    setSelectedDiscipline('');
+                    setSelectedGroups([]);
+                    setLessonCount('');
+                    setCalculatedEndDate(null);
+                } catch (err) {
+                    console.error('Ошибка при загрузке данных:', err);
+                    setError('Не удалось загрузить справочники');
+                } finally {
+                    setIsLoadingData(false);
+                }
+            };
+            loadData();
+        }
+    }, [show]);
+
+    // Сброс формы при закрытии
+    useEffect(() => {
+        if (!show) {
+            setSelectedTeachers([]);
+            setSelectedDiscipline('');
+            setSelectedGroups([]);
+            setLessonCount('');
+            setCalculatedEndDate(null);
+            setError('');
+            setTeacherDropdownOpen(false);
+            setGroupDropdownOpen(false);
+        }
+    }, [show]);
+
+    // Валидация формы
+    const validateForm = () => {
+        if (!startDate) {
+            setError('Выберите дату первого занятия');
+            return false;
+        }
+        if (!lessonCount || lessonCount < 1) {
+            setError('Введите количество занятий (не менее 1)');
+            return false;
+        }
+        if (selectedTeachers.length === 0) {
+            setError('Выберите хотя бы одного преподавателя');
+            return false;
+        }
+        if (!selectedDiscipline) {
+            setError('Выберите дисциплину');
+            return false;
+        }
+        if (selectedGroups.length === 0) {
+            setError('Выберите хотя бы одну группу');
+            return false;
+        }
+        return true;
+    };
+
+    // Обработчик сохранения
+    const handleSave = async () => {
+        if (!validateForm()) return;
+
+        setIsCheckingConflicts(true);
+        
+        const conflicts = checkAllSlotsForConflicts(
+            selectedSlots,
+            startDate,
+            parseInt(lessonCount, 10),
+            semesterStartDate
+        );
+        
+        if (conflicts.length > 0) {
+            let conflictMessage = 'Найдены конфликты:\n\n';
+            for (const conflict of conflicts.slice(0, 5)) {
+                conflictMessage += `• ${conflict.slot.dayName}, ${conflict.slot.pairNumber} пара:\n`;
+                conflictMessage += `  Занято: ${conflict.discipline} (${conflict.group})\n`;
+                conflictMessage += `  Преподаватель: ${conflict.teacher}\n`;
+                conflictMessage += `  Дата: ${conflict.date}\n\n`;
+            }
+            if (conflicts.length > 5) {
+                conflictMessage += `... и ещё ${conflicts.length - 5} конфликтов\n\n`;
+            }
+            conflictMessage += 'Всё равно создать занятия?';
+            
+            setIsCheckingConflicts(false);
+            
+            if (!window.confirm(conflictMessage)) {
+                return;
+            }
+        }
+        
+        setIsCheckingConflicts(false);
+        setIsSubmitting(true);
+        setError('');
+
+        try {
+            const payload = {
+                auditoriumId,
+                slots: selectedSlots,
+                teacherIds: selectedTeachers,
+                disciplineId: selectedDiscipline,
+                groupIds: selectedGroups,
+                startDate: startDate.toISOString().split('T')[0],
+                lessonCount: parseInt(lessonCount, 10)
+            };
+
+            const result = await bulkCreateLessons(payload);
+            
+            if (result.errors && result.errors.length > 0) {
+                alert(`Создано ${result.created.length} занятий. Ошибок: ${result.errors.length}`);
+            } else {
+                alert(`Успешно создано ${result.created.length} занятий!`);
+            }
+            
+            if (onSuccess) {
+                onSuccess();
+            }
+            onHide();
+        } catch (err) {
+            console.error('Ошибка при создании занятий:', err);
+            setError(err.response?.data?.message || 'Произошла ошибка при сохранении');
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    // Форматирование числа занятий для правильного склонения
+    const getLessonWord = (count) => {
+        const num = parseInt(count, 10);
+        if (num === 1) return 'раз';
+        if (num >= 2 && num <= 4) return 'раза';
+        return 'раз';
+    };
+
+    return (
+        <Modal show={show} onHide={onHide} size="lg" centered backdrop="static">
+            <Modal.Header closeButton style={{ backgroundColor: '#4682B4', color: 'white' }}>
+                <Modal.Title>
+                    Добавить занятие
+                    <span style={{ fontSize: '0.9rem', marginLeft: '15px', opacity: 0.9 }}>
+                        (выбрано слотов: {selectedSlots.length})
+                    </span>
+                </Modal.Title>
+            </Modal.Header>
+            
+            <Modal.Body>
+                {isLoadingData ? (
+                    <div className="text-center py-4">
+                        <Spinner animation="border" variant="primary" />
+                        <p className="mt-2">Загрузка справочников...</p>
+                    </div>
+                ) : (
+                    <Form>
+                        <Row>
+                            <Col md={6}>
+                                <Form.Group className="mb-3">
+                                    <Form.Label style={{ fontWeight: 'bold' }}>Дата первого занятия</Form.Label>
+                                    <DatePicker
+                                        selected={startDate}
+                                        onChange={date => { setStartDate(date); setError(''); }}
+                                        dateFormat="dd.MM.yyyy"
+                                        locale="ru"
+                                        placeholderText="дд.мм.гггг"
+                                        className="form-control"
+                                    />
+                                </Form.Group>
+                            </Col>
+                            <Col md={6}>
+                                <Form.Group className="mb-3">
+                                    <Form.Label style={{ fontWeight: 'bold' }}>Количество занятий</Form.Label>
+                                    <Form.Control
+                                        type="number"
+                                        min="1"
+                                        placeholder="Введите количество"
+                                        value={lessonCount}
+                                        onChange={e => { setLessonCount(e.target.value); setError(''); }}
+                                    />
+                                </Form.Group>
+                            </Col>
+                        </Row>
+
+                        {calculatedEndDate && (
+                            <div style={{ backgroundColor: '#f8f9fa', padding: '10px 12px', borderRadius: '6px', marginBottom: '15px', fontSize: '0.95rem' }}>
+                                <span style={{ color: '#6c757d' }}>Дата последнего занятия: </span>
+                                <strong>{calculatedEndDate.toLocaleDateString('ru-RU')}</strong>
+                                <span style={{ color: '#6c757d', marginLeft: '10px' }}>
+                                    (через {lessonCount} {getLessonWord(lessonCount)} в 2 недели)
+                                </span>
+                            </div>
+                        )}
+
+                        {/* Выпадающий список для преподавателей */}
+                        <Form.Group className="mb-3">
+                            <Form.Label style={{ fontWeight: 'bold' }}>Преподаватели</Form.Label>
+                            <Dropdown show={teacherDropdownOpen} onToggle={setTeacherDropdownOpen}>
+                                <Dropdown.Toggle variant="outline-secondary" style={{ width: '100%', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {getSelectedTeachersText()}
+                                </Dropdown.Toggle>
+                                <Dropdown.Menu style={{ maxHeight: '300px', overflowY: 'auto', width: '100%', padding: '8px 0' }}>
+                                    {teachers.map(teacher => (
+                                        <Dropdown.Item key={teacher.id} onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleTeacher(teacher.id); }}>
+                                            <Form.Check
+                                                type="checkbox"
+                                                label={teacher.surname_N_P}
+                                                checked={selectedTeachers.includes(teacher.id)}
+                                                onChange={() => {}}
+                                            />
+                                        </Dropdown.Item>
+                                    ))}
+                                </Dropdown.Menu>
+                            </Dropdown>
+                        </Form.Group>
+
+                        <Form.Group className="mb-3">
+                            <Form.Label style={{ fontWeight: 'bold' }}>Дисциплина</Form.Label>
+                            <Form.Select value={selectedDiscipline} onChange={e => { setSelectedDiscipline(e.target.value); setError(''); }}>
+                                <option value="">Выберите дисциплину</option>
+                                {disciplines.map(discipline => (
+                                    <option key={discipline.id} value={discipline.id}>{discipline.short_name || discipline.name}</option>
+                                ))}
+                            </Form.Select>
+                        </Form.Group>
+
+                        {/* Выпадающий список для групп */}
+                        <Form.Group className="mb-3">
+                            <Form.Label style={{ fontWeight: 'bold' }}>Группы</Form.Label>
+                            <Dropdown show={groupDropdownOpen} onToggle={setGroupDropdownOpen}>
+                                <Dropdown.Toggle variant="outline-secondary" style={{ width: '100%', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {getSelectedGroupsText()}
+                                </Dropdown.Toggle>
+                                <Dropdown.Menu style={{ maxHeight: '300px', overflowY: 'auto', width: '100%', padding: '8px 0' }}>
+                                    {groups.map(group => (
+                                        <Dropdown.Item key={group.id} onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleGroup(group.id); }}>
+                                            <Form.Check
+                                                type="checkbox"
+                                                label={group.name}
+                                                checked={selectedGroups.includes(group.id)}
+                                                onChange={() => {}}
+                                            />
+                                        </Dropdown.Item>
+                                    ))}
+                                </Dropdown.Menu>
+                            </Dropdown>
+                        </Form.Group>
+
+                        {error && <Alert variant="danger" className="mt-3">{error}</Alert>}
+                    </Form>
+                )}
+            </Modal.Body>
+            
+            <Modal.Footer>
+                <Button variant="secondary" onClick={onHide} disabled={isSubmitting || isCheckingConflicts}>Отмена</Button>
+                <Button
+                    variant="primary"
+                    onClick={handleSave}
+                    disabled={isLoadingData || isSubmitting || isCheckingConflicts}
+                    style={{ backgroundColor: '#4682B4', borderColor: '#4682B4' }}
+                >
+                    {isCheckingConflicts ? (
+                        <><Spinner size="sm" animation="border" className="me-2" />Проверка конфликтов...</>
+                    ) : isSubmitting ? (
+                        <><Spinner size="sm" animation="border" className="me-2" />Сохранение...</>
+                    ) : 'Сохранить'}
+                </Button>
+            </Modal.Footer>
+        </Modal>
+    );
+};
+
+export default BulkAssignmentModal;
